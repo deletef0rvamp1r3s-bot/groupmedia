@@ -14,20 +14,22 @@ if not BOT_TOKEN:
 bot = telebot.TeleBot(BOT_TOKEN)
 app = Flask(__name__)
 
-# قاموس لتخزين الميديا حسب الـ chat_id
+# قاموس لتخزين الميديا ومعلومات الرسائل الأصلية
 media_groups = {}
 timers = {}
 
 def send_buffered_media(chat_id):
     if chat_id in media_groups:
-        media_list = media_groups[chat_id]
+        # فصل الميديا عن أرقام الرسائل
+        media_list = [item['media'] for item in media_groups[chat_id]]
+        message_ids_to_delete = [item['message_id'] for item in media_groups[chat_id]]
         
         # تنظيف الذاكرة فوراً عشان البوت يقدر يستقبل دفعات جديدة
         del media_groups[chat_id]
         if chat_id in timers:
             del timers[chat_id]
 
-        # تقسيم القائمة الكبيرة إلى مجموعات، كل مجموعة فيها 10 مقاطع كحد أقصى
+        # تقسيم القائمة الكبيرة إلى مجموعات (10 مقاطع كحد أقصى)
         chunks = [media_list[i:i + 10] for i in range(0, len(media_list), 10)]
         
         for chunk in chunks:
@@ -44,13 +46,21 @@ def send_buffered_media(chat_id):
             except Exception as e:
                 print(f"Error sending media group: {e}")
             
-            # 🛑 مهم جداً: تأخير ثانية ونص بين كل ألبوم عشان تيليجرام ما يحظر البوت (Flood Control)
+            # 🛑 تأخير ثانية ونص لتجنب الحظر (Flood Control)
             time.sleep(1.5)
+
+        # 🧹 حذف الرسائل المفرقة اللي أرسلها المستخدم عشان المحادثة تصير نظيفة
+        try:
+            bot.delete_messages(chat_id, message_ids_to_delete)
+        except Exception as e:
+            print(f"Error deleting original messages: {e}")
 
 @bot.message_handler(content_types=['photo', 'video'])
 def handle_media(message):
     chat_id = message.chat.id
+    message_id = message.message_id
 
+    # إعداد الميديا بدون سحب النص (الألبوم بيكون نظيف)
     if message.photo:
         file_id = message.photo[-1].file_id
         media_item = InputMediaPhoto(file_id)
@@ -60,13 +70,13 @@ def handle_media(message):
     else:
         return
 
-    # إضافة المقطع لقائمة المستخدم
+    # إضافة المقطع ورقم الرسالة لقائمة المستخدم
     if chat_id not in media_groups:
         media_groups[chat_id] = []
 
-    media_groups[chat_id].append(media_item)
+    media_groups[chat_id].append({'media': media_item, 'message_id': message_id})
 
-    # إلغاء المؤقت القديم وإعادة ضبطه (انتظار 3 ثواني لتجميع كل المقاطع مهما كان عددها)
+    # إلغاء المؤقت القديم وإعادة ضبطه (انتظار 3 ثواني للتجميع)
     if chat_id in timers:
         timers[chat_id].cancel()
 
