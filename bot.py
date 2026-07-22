@@ -13,13 +13,13 @@ if not BOT_TOKEN:
 bot = telebot.TeleBot(BOT_TOKEN)
 app = Flask(__name__)
 
-# قاموس لتخزين الميديا حسب الـ media_group_id أو الـ chat_id
+# قاموس لتخزين الميديا حسب الـ chat_id
 media_groups = {}
 timers = {}
 
-def send_buffered_media(chat_id, group_id):
-    if group_id in media_groups:
-        media_list = media_groups[group_id]
+def send_buffered_media(chat_id):
+    if chat_id in media_groups:
+        media_list = media_groups[chat_id]
         try:
             if len(media_list) > 1:
                 bot.send_media_group(chat_id, media_list)
@@ -34,15 +34,14 @@ def send_buffered_media(chat_id, group_id):
             print(f"Error sending media group: {e}")
         
         # تنظيف الذاكرة بعد الإرسال
-        del media_groups[group_id]
-        if group_id in timers:
-            del timers[group_id]
+        if chat_id in media_groups:
+            del media_groups[chat_id]
+        if chat_id in timers:
+            del timers[chat_id]
 
 @bot.message_handler(content_types=['photo', 'video'])
 def handle_media(message):
     chat_id = message.chat.id
-    # إذا كانت الرسالة أصلًا جزءاً من قروب ميديا في تيليجرام
-    group_id = message.media_group_id if message.media_group_id else f"single_{message.chat.id}_{message.message_id}"
 
     if message.photo:
         file_id = message.photo[-1].file_id
@@ -53,17 +52,25 @@ def handle_media(message):
     else:
         return
 
-    if group_id not in media_groups:
-        media_groups[group_id] = []
+    # استخدام chat_id لجمع كل مقاطع الشخص في قائمة واحدة
+    if chat_id not in media_groups:
+        media_groups[chat_id] = []
 
-    media_groups[group_id].append(media_item)
+    media_groups[chat_id].append(media_item)
 
-    # إلغاء المؤقت القديم وإعادة ضبطه (انتظار ثانيتين لتجميع كل المقاطع المرسلة دفعة واحدة)
-    if group_id in timers:
-        timers[group_id].cancel()
+    # إذا وصل العدد 10 (الحد الأقصى للألبوم في تيليجرام)، نرسلهم فوراً
+    if len(media_groups[chat_id]) == 10:
+        if chat_id in timers:
+            timers[chat_id].cancel()
+        send_buffered_media(chat_id)
+        return
 
-    timers[group_id] = threading.Timer(2.0, send_buffered_media, args=[chat_id, group_id])
-    timers[group_id].start()
+    # إلغاء المؤقت القديم وإعادة ضبطه (انتظار 3 ثواني لتجميع كل المقاطع)
+    if chat_id in timers:
+        timers[chat_id].cancel()
+
+    timers[chat_id] = threading.Timer(3.0, send_buffered_media, args=[chat_id])
+    timers[chat_id].start()
 
 # ----- إعدادات السيرفر الوهمي لـ Render -----
 @app.route('/')
