@@ -1,4 +1,6 @@
 import os
+import threading
+from flask import Flask
 import telebot
 from telebot.types import InputMediaVideo, InputMediaPhoto
 
@@ -9,67 +11,72 @@ if not BOT_TOKEN:
     raise ValueError("⚠️ خطأ: لم يتم العثور على التوكن! تأكد من إضافته في إعدادات البيئة (Environment) في Render.")
 
 bot = telebot.TeleBot(BOT_TOKEN)
+app = Flask(__name__)
 
-# ذاكرة مؤقتة لحفظ المقاطع قبل الإرسال
-user_media_store = {}
+# قاموس لتخزين الميديا حسب الـ media_group_id أو الـ chat_id
+media_groups = {}
+timers = {}
 
-@bot.message_handler(commands=['start'])
-def start_cmd(message):
-    bot.reply_to(
-        message, 
-        "👋 أهلاً بك!\n\n"
-        "1️⃣ أرسل لي المقاطع والصور مفرقة واحد تلو الآخر.\n"
-        "2️⃣ بعد الانتهاء أرسل `/send` لدمجها في ألبوم واحد وإرسالها.\n"
-        "3️⃣ إذا أردت إلغاء القائمة والبدء من جديد أرسل `/clear`."
-    )
+def send_buffered_media(chat_id, group_id):
+    if group_id in media_groups:
+        media_list = media_groups[group_id]
+        try:
+            if len(media_list) > 1:
+                bot.send_media_group(chat_id, media_list)
+            elif len(media_list) == 1:
+                # إذا طلع مقطع واحد فقط يرسله بالطريقة العادية
+                item = media_list[0]
+                if isinstance(item, InputMediaPhoto):
+                    bot.send_photo(chat_id, item.media)
+                elif isinstance(item, InputMediaVideo):
+                    bot.send_video(chat_id, item.media)
+        except Exception as e:
+            print(f"Error sending media group: {e}")
+        
+        # تنظيف الذاكرة بعد الإرسال
+        del media_groups[group_id]
+        if group_id in timers:
+            del timers[group_id]
 
-# 📥 استقبال الصور والفيديوهات وحفظها
 @bot.message_handler(content_types=['photo', 'video'])
 def handle_media(message):
-    user_id = message.from_user.id
-    
-    if user_id not in user_media_store:
-        user_media_store[user_id] = []
-        
-    if len(user_media_store[user_id]) >= 10:
-        bot.reply_to(message, "⚠️ وصلت للحد الأقصى (10 مقاطع)! أرسل `/send` للدمج الآن.")
-        return
+    chat_id = message.chat.id
+    # إذا كانت الرسالة أصلًا جزءاً من قروب ميديا في تيليجرام
+    group_id = message.media_group_id if message.media_group_id else f"single_{message.chat.id}_{message.message_id}"
 
     if message.photo:
         file_id = message.photo[-1].file_id
-        user_media_store[user_id].append(InputMediaPhoto(file_id))
+        media_item = InputMediaPhoto(file_id)
     elif message.video:
         file_id = message.video.file_id
-        user_media_store[user_id].append(InputMediaVideo(file_id))
-        
-    current_count = len(user_media_store[user_id])
-    bot.reply_to(message, f"📥 تم حفظ المقطع ({current_count}/10). أرسل التالي أو اكتب `/send` للدمج.")
-
-# 🚀 دمج وإرسال الألبوم
-@bot.message_handler(commands=['send'])
-def send_album(message):
-    user_id = message.from_user.id
-    media_list = user_media_store.get(user_id, [])
-    
-    if len(media_list) < 2:
-        bot.reply_to(message, "⚠️ يجب إرسال مقطعين أو صورتين على الأقل لتشكيل ألبوم!")
+        media_item = InputMediaVideo(file_id)
+    else:
         return
-        
-    try:
-        bot.send_message(message.chat.id, "⏳ جاري دمج المقاطع وإرسال الألبوم...")
-        bot.send_media_group(message.chat.id, media_list)
-        user_media_store[user_id] = []
-        bot.send_message(message.chat.id, "✅ تم الإرسال بنجاح وتفريغ الذاكرة!")
-        
-    except Exception as e:
-        bot.reply_to(message, f"❌ حدث خطأ أثناء الإرسال: {e}")
 
-# 🗑️ مسح القائمة الحالية
-@bot.message_handler(commands=['clear'])
-def clear_media(message):
-    user_id = message.from_user.id
-    user_media_store[user_id] = []
-    bot.reply_to(message, "🗑️ تم مسح جميع المقاطع المحفوظة.")
+    if group_id not in media_groups:
+        media_groups[group_id] = []
 
-print("🤖 البوت يعمل الآن بأمان من خلال Render...")
-bot.infinity_polling()
+    media_groups[group_id].append(media_item)
+
+    # إلغاء المؤقت القديم وإعادة ضبطه (انتظار ثانيتين لتجميع كل المقاطع المرسلة دفعة واحدة)
+    if group_id in timers:
+        timers[group_id].cancel()
+
+    timers[group_id] = threading.Timer(2.0, send_buffered_media, args=[chat_id, group_id])
+    timers[group_id].start()
+
+# ----- إعدادات السيرفر الوهمي لـ Render -----
+@app.route('/')
+def index():
+    return "البوت يعمل 24 ساعة بأمان!"
+
+def run_web_server():
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host="0.0.0.0", port=port, use_reloader=False)
+
+if __name__ == "__main__":
+    t = threading.Thread(target=run_web_server)
+    t.daemon = True
+    t.start()
+    print("🤖 بوت تجميع القروب ميديا يعمل الآن...")
+    bot.infinity_polling()
