@@ -1,5 +1,6 @@
 import os
 import threading
+import time
 from flask import Flask
 import telebot
 from telebot.types import InputMediaVideo, InputMediaPhoto
@@ -20,24 +21,31 @@ timers = {}
 def send_buffered_media(chat_id):
     if chat_id in media_groups:
         media_list = media_groups[chat_id]
-        try:
-            if len(media_list) > 1:
-                bot.send_media_group(chat_id, media_list)
-            elif len(media_list) == 1:
-                # إذا طلع مقطع واحد فقط يرسله بالطريقة العادية
-                item = media_list[0]
-                if isinstance(item, InputMediaPhoto):
-                    bot.send_photo(chat_id, item.media)
-                elif isinstance(item, InputMediaVideo):
-                    bot.send_video(chat_id, item.media)
-        except Exception as e:
-            print(f"Error sending media group: {e}")
         
-        # تنظيف الذاكرة بعد الإرسال
-        if chat_id in media_groups:
-            del media_groups[chat_id]
+        # تنظيف الذاكرة فوراً عشان البوت يقدر يستقبل دفعات جديدة
+        del media_groups[chat_id]
         if chat_id in timers:
             del timers[chat_id]
+
+        # تقسيم القائمة الكبيرة إلى مجموعات، كل مجموعة فيها 10 مقاطع كحد أقصى
+        chunks = [media_list[i:i + 10] for i in range(0, len(media_list), 10)]
+        
+        for chunk in chunks:
+            try:
+                if len(chunk) > 1:
+                    bot.send_media_group(chat_id, chunk)
+                elif len(chunk) == 1:
+                    # إذا كان الباقي مقطع واحد فقط يرسله بالطريقة العادية
+                    item = chunk[0]
+                    if isinstance(item, InputMediaPhoto):
+                        bot.send_photo(chat_id, item.media)
+                    elif isinstance(item, InputMediaVideo):
+                        bot.send_video(chat_id, item.media)
+            except Exception as e:
+                print(f"Error sending media group: {e}")
+            
+            # 🛑 مهم جداً: تأخير ثانية ونص بين كل ألبوم عشان تيليجرام ما يحظر البوت (Flood Control)
+            time.sleep(1.5)
 
 @bot.message_handler(content_types=['photo', 'video'])
 def handle_media(message):
@@ -52,20 +60,13 @@ def handle_media(message):
     else:
         return
 
-    # استخدام chat_id لجمع كل مقاطع الشخص في قائمة واحدة
+    # إضافة المقطع لقائمة المستخدم
     if chat_id not in media_groups:
         media_groups[chat_id] = []
 
     media_groups[chat_id].append(media_item)
 
-    # إذا وصل العدد 10 (الحد الأقصى للألبوم في تيليجرام)، نرسلهم فوراً
-    if len(media_groups[chat_id]) == 10:
-        if chat_id in timers:
-            timers[chat_id].cancel()
-        send_buffered_media(chat_id)
-        return
-
-    # إلغاء المؤقت القديم وإعادة ضبطه (انتظار 3 ثواني لتجميع كل المقاطع)
+    # إلغاء المؤقت القديم وإعادة ضبطه (انتظار 3 ثواني لتجميع كل المقاطع مهما كان عددها)
     if chat_id in timers:
         timers[chat_id].cancel()
 
