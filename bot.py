@@ -30,7 +30,7 @@ def ask_for_caption(chat_id):
             del timers[chat_id]
 
         # سؤال المستخدم عن الكابشن
-        msg = bot.send_message(chat_id, "وش تبي تحط كلام بالكابشن؟\n(أرسل 'بدون' لو تبي اليوزر بس)")
+        msg = bot.send_message(chat_id, "وش تبي تحط كلام بالكابشن؟\n(أرسل 'بدون' لو تبي الهاشتاق بس)")
         message_ids_to_delete.append(msg.message_id)
 
         # نقل البيانات لقائمة الانتظار
@@ -64,8 +64,8 @@ def process_group_caption(message):
 
     custom_text = message.text
     
-    # الكابشن الثابت الأساسي مع الهاشتاق الجديد
-    base_caption = "@vamp1r3s\n#حصريات_VAMP1R3S"
+    # الكابشن الثابت الأساسي يحتوي على الهاشتاق فقط
+    base_caption = "#حصريات_VAMP1R3S"
     
     if custom_text != 'بدون':
         # وضع سطرين فارغة بين الهاشتاق والكلام الاختياري
