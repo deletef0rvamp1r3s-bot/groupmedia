@@ -14,53 +14,98 @@ if not BOT_TOKEN:
 bot = telebot.TeleBot(BOT_TOKEN)
 app = Flask(__name__)
 
-# قاموس لتخزين الميديا ومعلومات الرسائل الأصلية
+# قواميس لتخزين الميديا ومعلومات الرسائل الأصلية ومرحلة الكابشن
 media_groups = {}
 timers = {}
+waiting_for_caption = {}
 
-def send_buffered_media(chat_id):
+def ask_for_caption(chat_id):
     if chat_id in media_groups:
-        # فصل الميديا عن أرقام الرسائل
         media_list = [item['media'] for item in media_groups[chat_id]]
         message_ids_to_delete = [item['message_id'] for item in media_groups[chat_id]]
         
-        # تنظيف الذاكرة فوراً عشان البوت يقدر يستقبل دفعات جديدة
+        # تنظيف الذاكرة المبدئية
         del media_groups[chat_id]
         if chat_id in timers:
             del timers[chat_id]
 
-        # تقسيم القائمة الكبيرة إلى مجموعات (10 مقاطع كحد أقصى)
-        chunks = [media_list[i:i + 10] for i in range(0, len(media_list), 10)]
-        
-        for chunk in chunks:
-            try:
-                if len(chunk) > 1:
-                    bot.send_media_group(chat_id, chunk)
-                elif len(chunk) == 1:
-                    # إذا كان الباقي مقطع واحد فقط يرسله بالطريقة العادية
-                    item = chunk[0]
-                    if isinstance(item, InputMediaPhoto):
-                        bot.send_photo(chat_id, item.media)
-                    elif isinstance(item, InputMediaVideo):
-                        bot.send_video(chat_id, item.media)
-            except Exception as e:
-                print(f"Error sending media group: {e}")
-            
-            # 🛑 تأخير ثانية ونص لتجنب الحظر (Flood Control)
-            time.sleep(1.5)
+        # سؤال المستخدم عن الكابشن
+        msg = bot.send_message(chat_id, "وش تبي تحط كلام بالكابشن تحت الهاشتاق؟\n(أرسل 'بدون' لو تبي الهاشتاق بس)")
+        message_ids_to_delete.append(msg.message_id)
 
-        # 🧹 حذف الرسائل المفرقة اللي أرسلها المستخدم عشان المحادثة تصير نظيفة
+        # نقل البيانات لقائمة الانتظار
+        waiting_for_caption[chat_id] = {
+            'media_list': media_list,
+            'messages_to_delete': message_ids_to_delete
+        }
+        
+        # توجيه الرد القادم من المستخدم لدالة الكابشن
+        bot.register_next_step_handler(msg, process_group_caption)
+
+def process_group_caption(message):
+    chat_id = message.chat.id
+    
+    if chat_id not in waiting_for_caption:
+        return
+        
+    state = waiting_for_caption[chat_id]
+    media_list = state['media_list']
+    messages_to_delete = state['messages_to_delete']
+    
+    # إضافة رسالة المستخدم (النص) لقائمة الحذف
+    messages_to_delete.append(message.message_id)
+
+    # التأكد أن المستخدم أرسل نص
+    if not message.text:
+        msg = bot.send_message(chat_id, "⚠️ الرجاء إرسال نص فقط. وش تبي تكتب بالكابشن؟")
+        messages_to_delete.append(msg.message_id)
+        bot.register_next_step_handler(msg, process_group_caption)
+        return
+
+    custom_text = message.text
+    base_caption = "#حصريات_@vamp1r3s\n"
+    
+    if custom_text != 'بدون':
+        final_caption = f"{base_caption}{custom_text}"
+    else:
+        final_caption = base_caption
+
+    # تقسيم القائمة إلى مجموعات (10 مقاطع كحد أقصى)
+    chunks = [media_list[i:i + 10] for i in range(0, len(media_list), 10)]
+    
+    for chunk in chunks:
+        # وضع الكابشن على أول مقطع/صورة في كل مجموعة ميديا يتم إرسالها
+        chunk[0].caption = final_caption
+        
         try:
-            bot.delete_messages(chat_id, message_ids_to_delete)
+            if len(chunk) > 1:
+                bot.send_media_group(chat_id, chunk)
+            elif len(chunk) == 1:
+                item = chunk[0]
+                if isinstance(item, InputMediaPhoto):
+                    bot.send_photo(chat_id, item.media, caption=item.caption)
+                elif isinstance(item, InputMediaVideo):
+                    bot.send_video(chat_id, item.media, caption=item.caption)
         except Exception as e:
-            print(f"Error deleting original messages: {e}")
+            print(f"Error sending media group: {e}")
+        
+        time.sleep(1.5)
+
+    # 🧹 حذف كل الرسائل المفرقة (المقاطع الأصلية + سؤال البوت + النص حقك)
+    try:
+        for i in range(0, len(messages_to_delete), 100):
+            bot.delete_messages(chat_id, messages_to_delete[i:i + 100])
+    except Exception as e:
+        print(f"Error deleting original messages: {e}")
+
+    # تفريغ الذاكرة
+    del waiting_for_caption[chat_id]
 
 @bot.message_handler(content_types=['photo', 'video'])
 def handle_media(message):
     chat_id = message.chat.id
     message_id = message.message_id
 
-    # إعداد الميديا بدون سحب النص (الألبوم بيكون نظيف)
     if message.photo:
         file_id = message.photo[-1].file_id
         media_item = InputMediaPhoto(file_id)
@@ -70,17 +115,16 @@ def handle_media(message):
     else:
         return
 
-    # إضافة المقطع ورقم الرسالة لقائمة المستخدم
     if chat_id not in media_groups:
         media_groups[chat_id] = []
 
     media_groups[chat_id].append({'media': media_item, 'message_id': message_id})
 
-    # إلغاء المؤقت القديم وإعادة ضبطه (انتظار 3 ثواني للتجميع)
     if chat_id in timers:
         timers[chat_id].cancel()
 
-    timers[chat_id] = threading.Timer(3.0, send_buffered_media, args=[chat_id])
+    # انتظار 3 ثواني لتجميع المقاطع، بعدها يطلب الكابشن
+    timers[chat_id] = threading.Timer(3.0, ask_for_caption, args=[chat_id])
     timers[chat_id].start()
 
 # ----- إعدادات السيرفر الوهمي لـ Render -----
