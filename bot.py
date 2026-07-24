@@ -30,7 +30,7 @@ def ask_for_caption(chat_id):
             del timers[chat_id]
 
         # سؤال المستخدم عن الكابشن
-        msg = bot.send_message(chat_id, "وش تبي تحط كلام بالكابشن؟\n(أرسل 'بدون' لو تبي العبارة الأساسية بس)")
+        msg = bot.send_message(chat_id, "وش تبي تحط كلام بالكابشن؟\n(أرسل 'بدون' لو تبي اليوزر بس)")
         message_ids_to_delete.append(msg.message_id)
 
         # نقل البيانات لقائمة الانتظار
@@ -64,11 +64,11 @@ def process_group_caption(message):
 
     custom_text = message.text
     
-    # الكابشن المعتمد (فصلنا اليوزر بمسافة عشان تيليجرام يتعرف عليه ويخليه أزرق ينضغط)
-    base_caption = "حصريات @vamp1r3s"
+    # الكابشن الثابت الأساسي كما طلبته بالضبط
+    base_caption = "@vamp1r3s"
     
     if custom_text != 'بدون':
-        # وضع 3 نزولات سطر (\n\n\n) عشان يعطيك سطرين فاضية (سبيس x2) بين العبارتين
+        # وضع 3 نزولات سطر (\n\n\n) عشان يعطيك سطرين فاضية بين اليوزر والكلام الاختياري
         final_caption = f"{base_caption}\n\n\n{custom_text}"
     else:
         final_caption = base_caption
@@ -94,7 +94,7 @@ def process_group_caption(message):
         
         time.sleep(1.5)
 
-    # 🧹 حذف كل الرسائل المفرقة (المقاطع الأصلية + سؤال البوت + النص حقك)
+    # 🧹 حذف كل الرسائل المفرقة
     try:
         for i in range(0, len(messages_to_delete), 100):
             bot.delete_messages(chat_id, messages_to_delete[i:i + 100])
