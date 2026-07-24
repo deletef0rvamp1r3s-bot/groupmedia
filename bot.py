@@ -64,11 +64,11 @@ def process_group_caption(message):
 
     custom_text = message.text
     
-    # الكابشن الثابت الأساسي كما طلبته بالضبط
-    base_caption = "@vamp1r3s"
+    # الكابشن الثابت الأساسي مع الهاشتاق الجديد
+    base_caption = "@vamp1r3s\n#حصريات_VAMP1R3S"
     
     if custom_text != 'بدون':
-        # وضع 3 نزولات سطر (\n\n\n) عشان يعطيك سطرين فاضية بين اليوزر والكلام الاختياري
+        # وضع سطرين فارغة بين الهاشتاق والكلام الاختياري
         final_caption = f"{base_caption}\n\n\n{custom_text}"
     else:
         final_caption = base_caption
