@@ -29,8 +29,8 @@ def ask_for_caption(chat_id):
         if chat_id in timers:
             del timers[chat_id]
 
-        # سؤال المستخدم عن الكابشن
-        msg = bot.send_message(chat_id, "وش تبي تحط كلام بالكابشن تحت الهاشتاق؟\n(أرسل 'بدون' لو تبي الهاشتاق بس)")
+        # سؤال المستخدم عن الكابشن (تم تعديل الرسالة)
+        msg = bot.send_message(chat_id, "وش تبي تحط كلام بالكابشن؟\n(أرسل 'بدون' لو تبي العبارة الأساسية بس)")
         message_ids_to_delete.append(msg.message_id)
 
         # نقل البيانات لقائمة الانتظار
@@ -63,10 +63,13 @@ def process_group_caption(message):
         return
 
     custom_text = message.text
-    base_caption = "#حصريات_@vamp1r3s\n"
+    
+    # الكابشن المعتمد بدون هاشتاق
+    base_caption = "حصريات_@vamp1r3s"
     
     if custom_text != 'بدون':
-        final_caption = f"{base_caption}{custom_text}"
+        # وضع 3 نزولات سطر (\n\n\n) عشان يعطيك سطرين فاضية (سبيس x2) بين العبارتين
+        final_caption = f"{base_caption}\n\n\n{custom_text}"
     else:
         final_caption = base_caption
 
