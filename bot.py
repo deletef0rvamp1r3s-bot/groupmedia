@@ -1,4 +1,5 @@
 import os
+import asyncio
 import threading
 import time
 import logging
@@ -29,8 +30,8 @@ tg = Client(
     api_id=int(API_ID),
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
-    in_memory=True,     # ✅ آمن لـ Render: لا ملف session على القرص
-    workers=2           # خيوط معالجة خفيفة تناسب 0.1 CPU
+    in_memory=True,
+    workers=2
 )
 
 web = Flask(__name__)
@@ -47,7 +48,7 @@ LOCK = threading.Lock()
 send_queue = queue.Queue()
 
 GROUP_DELAY = 3.0
-SESSION_TIMEOUT = 1200        # 20 دقيقة خمول → تفريغ كامل
+SESSION_TIMEOUT = 1200
 MAX_MEDIA_PER_GROUP = 100
 BASE_CAPTION = "#حصريات_VAMP1R3S"
 START_TIME = time.time()
@@ -81,7 +82,7 @@ def sender_worker():
 
 
 def safe_call(func, *args, **kwargs):
-    """محاولات مع احترام FloodWait (حماية من حدود تليجرام)."""
+    """محاولات مع احترام FloodWait."""
     for _ in range(3):
         try:
             return func(*args, **kwargs)
@@ -183,7 +184,6 @@ def process_group_caption(message):
     state['messages_to_delete'].append(message.id)
     text = message.text
 
-    # إلغاء
     if text and text.strip() in ('إلغاء', '/cancel'):
         with LOCK:
             waiting_for_caption.pop(chat_id, None)
@@ -263,7 +263,6 @@ def handle_media(client, message):
         return
 
     with LOCK:
-        # إذا نحن بانتظار كابشن منه: أضف الميديا لنفس التجميعة بدون سؤال جديد
         state = waiting_for_caption.get(chat_id)
         if state:
             if len(state['media_list']) < MAX_MEDIA_PER_GROUP:
@@ -295,7 +294,6 @@ def handle_media(client, message):
 
 @tg.on_message(filters.text & ~filters.bot)
 def handle_text(client, message):
-    """أي رسالة نصية: إذا الشات بانتظار كابشن → وجّهها للمعالجة."""
     with LOCK:
         waiting = message.chat.id in waiting_for_caption
     if waiting:
@@ -304,13 +302,19 @@ def handle_text(client, message):
 
 # ----- 🚀 التشغيل -----
 if __name__ == "__main__":
+    # 🔧 إصلاح مشكلة Event Loop في Python 3.10+ على Render
+    try:
+        asyncio.get_event_loop()
+    except RuntimeError:
+        asyncio.set_event_loop(asyncio.new_event_loop())
+
     threading.Thread(target=run_web_server, daemon=True).start()
     threading.Thread(target=cleanup_loop, daemon=True).start()
     threading.Thread(target=sender_worker, daemon=True).start()
 
-    tg.start()  # تسجيل الدخول عبر BOT_TOKEN + API_ID + API_HASH
+    tg.start()
     logger.info("🤖 البوت يعمل الآن (Pyrogram MTProto + جلسات 20 دقيقة).")
 
-    idle()      # يلتقط SIGTERM من Render ويوقف بأمان عند النوم/إعادة النشر
+    idle()
     tg.stop()
     logger.info("توقف البوت بشكل نظيف.")
