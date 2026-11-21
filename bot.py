@@ -1,47 +1,60 @@
 import os
-import signal
 import threading
 import time
 import logging
 import queue
 
 from flask import Flask
-import telebot
-from telebot.types import InputMediaVideo, InputMediaPhoto
+from pyrogram import Client, filters, idle
+from pyrogram.types import InputMediaPhoto, InputMediaVideo
+from pyrogram.errors import FloodWait
 
 # ----- لوقات خفيفة -----
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
-for noisy in ("urllib3", "waitress", "telebot", "requests"):
+for noisy in ("urllib3", "waitress", "pyrogram", "requests"):
     logging.getLogger(noisy).setLevel(logging.WARNING)
 logger = logging.getLogger("bot")
 
+# 🔑 الثلاثة من متغيرات البيئة في Render
+API_ID = os.environ.get("API_ID")
+API_HASH = os.environ.get("API_HASH")
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-if not BOT_TOKEN:
-    raise ValueError("⚠️ خطأ: لم يتم العثور على التوكن! أضفه في Environment في Render.")
 
-bot = telebot.TeleBot(BOT_TOKEN, num_threads=2)
-app = Flask(__name__)
+if not (API_ID and API_HASH and BOT_TOKEN):
+    raise ValueError("⚠️ تأكد من إضافة API_ID و API_HASH و BOT_TOKEN في Environment في Render.")
+
+# ----- عميل تليجرام (MTProto) بجلسة داخل الذاكرة -----
+tg = Client(
+    name="vampires_bot",
+    api_id=int(API_ID),
+    api_hash=API_HASH,
+    bot_token=BOT_TOKEN,
+    in_memory=True,     # ✅ آمن لـ Render: لا ملف session على القرص
+    workers=2           # خيوط معالجة خفيفة تناسب 0.1 CPU
+)
+
+web = Flask(__name__)
 
 # ----- الحالة + الحماية -----
 media_groups = {}
 timers = {}
 waiting_for_caption = {}
-session_timers = {}     # مؤقّتات الخمول 20 دقيقة لكل شات
-last_activity = {}      # آخر نشاط لكل شات (شبكة أمان للتنظيف الدوري)
+session_timers = {}
+last_activity = {}
 warned_overflow = set()
 LOCK = threading.Lock()
 
 send_queue = queue.Queue()
 
-GROUP_DELAY = 3.0             # تجميع الألبوم
-SESSION_TIMEOUT = 1200        # 🔑 20 دقيقة: بعدها خامل تمامًا
+GROUP_DELAY = 3.0
+SESSION_TIMEOUT = 1200        # 20 دقيقة خمول → تفريغ كامل
 MAX_MEDIA_PER_GROUP = 100
 BASE_CAPTION = "#حصريات_VAMP1R3S"
 START_TIME = time.time()
 
 
-# ---------- 🌐 نقطة الصحة ----------
-@app.route('/')
+# ---------- 🌐 نقطة الصحة (UptimeRobot) ----------
+@web.route('/')
 def index():
     return f"OK - uptime {int(time.time() - START_TIME)}s", 200
 
@@ -50,9 +63,9 @@ def run_web_server():
     port = int(os.environ.get("PORT", 8080))
     try:
         from waitress import serve
-        serve(app, host="0.0.0.0", port=port, threads=2)
+        serve(web, host="0.0.0.0", port=port, threads=2)
     except ImportError:
-        app.run(host="0.0.0.0", port=port, threaded=True, use_reloader=False)
+        web.run(host="0.0.0.0", port=port, threaded=True, use_reloader=False)
 
 
 # ---------- 📨 خيط الإرسال الخلفي ----------
@@ -67,9 +80,22 @@ def sender_worker():
             send_queue.task_done()
 
 
+def safe_call(func, *args, **kwargs):
+    """محاولات مع احترام FloodWait (حماية من حدود تليجرام)."""
+    for _ in range(3):
+        try:
+            return func(*args, **kwargs)
+        except FloodWait as fw:
+            logger.warning(f"FloodWait: انتظار {fw.value} ثانية...")
+            time.sleep(fw.value + 1)
+        except Exception as e:
+            logger.error(f"خطأ API: {e}")
+            return None
+    return None
+
+
 # ---------- 🧠 إدارة الجلسات (20 دقيقة) ----------
 def touch_session(chat_id):
-    """أي نشاط من الشات يجدّد عدّاد الـ20 دقيقة."""
     with LOCK:
         last_activity[chat_id] = time.time()
         old = session_timers.pop(chat_id, None)
@@ -81,7 +107,6 @@ def touch_session(chat_id):
 
 
 def purge_chat(chat_id, notify=True):
-    """انتهت الـ20 دقيقة: تفريغ كامل للذاكرة → خامل."""
     with LOCK:
         had_state = chat_id in media_groups or chat_id in waiting_for_caption
         media_groups.pop(chat_id, None)
@@ -95,16 +120,13 @@ def purge_chat(chat_id, notify=True):
         last_activity.pop(chat_id, None)
         warned_overflow.discard(chat_id)
     if had_state:
-        logger.info(f"🧠 شات {chat_id}: انتهت 20 دقيقة بدون نشاط → الذاكرة صفر، خامل.")
+        logger.info(f"🧠 شات {chat_id}: 20 دقيقة بدون نشاط → الذاكرة صفر، خامل.")
         if notify:
-            try:
-                bot.send_message(chat_id, "⏰ انتهت جلسة الحفظ (20 دقيقة بدون نشاط) وتم تفريغ الذاكرة.\nأرسل مقاطعك من جديد متى ما تبي.")
-            except Exception:
-                pass
+            safe_call(tg.send_message, chat_id,
+                      "⏰ انتهت جلسة الحفظ (20 دقيقة بدون نشاط) وتم تفريغ الذاكرة.\nأرسل مقاطعك من جديد متى ما تبي.")
 
 
 def close_session(chat_id):
-    """إغلاق فوري بعد إكمال العملية أو الإلغاء (ما ننتظر 20 دقيقة)."""
     with LOCK:
         st = session_timers.pop(chat_id, None)
         if st:
@@ -113,7 +135,6 @@ def close_session(chat_id):
         warned_overflow.discard(chat_id)
 
 
-# ---------- 🧹 شبكة أمان: تنظيف دوري كل 5 دقائق ----------
 def cleanup_loop():
     while True:
         time.sleep(300)
@@ -123,12 +144,6 @@ def cleanup_loop():
                      if now - ts > SESSION_TIMEOUT + 120]
         for cid in stale:
             purge_chat(cid, notify=False)
-
-
-# ---------- 📴 إيقاف آمن ----------
-def handle_sigterm(signum, frame):
-    logger.info("📴 SIGTERM - إيقاف نظيف...")
-    threading.Thread(target=bot.stop_bot, daemon=True).start()
 
 
 # ---------- منطق البوت ----------
@@ -143,20 +158,18 @@ def ask_for_caption(chat_id):
     media_list = [it['media'] for it in items]
     messages_to_delete = [it['message_id'] for it in items]
 
-    try:
-        msg = bot.send_message(chat_id, "وش تبي تحط كلام بالكابشن؟\n(أرسل 'بدون' لو تبي الهاشتاق بس)")
-    except Exception as e:
-        logger.error(f"فشل سؤال الكابشن: {e}")
+    msg = safe_call(tg.send_message, chat_id,
+                    "وش تبي تحط كلام بالكابشن؟\n(أرسل 'بدون' لو تبي الهاشتاق بس)")
+    if not msg:
         return
 
-    messages_to_delete.append(msg.message_id)
+    messages_to_delete.append(msg.id)
     with LOCK:
         waiting_for_caption[chat_id] = {
             'media_list': media_list,
             'messages_to_delete': messages_to_delete,
             'created_at': time.time()
         }
-    bot.register_next_step_handler(msg, process_group_caption)
 
 
 def process_group_caption(message):
@@ -164,42 +177,44 @@ def process_group_caption(message):
     with LOCK:
         state = waiting_for_caption.get(chat_id)
     if not state:
-        return  # الجلسة انتهت (خامل) → نتجاهل بهدوء
+        return
 
-    touch_session(chat_id)  # ردّه = نشاط يجدّد العداد
-    state['messages_to_delete'].append(message.message_id)
+    touch_session(chat_id)
+    state['messages_to_delete'].append(message.id)
     text = message.text
 
     # إلغاء
     if text and text.strip() in ('إلغاء', '/cancel'):
         with LOCK:
             waiting_for_caption.pop(chat_id, None)
-        m = bot.send_message(chat_id, "❌ تم إلغاء العملية.")
-        state['messages_to_delete'].append(m.message_id)
+        m = safe_call(tg.send_message, chat_id, "❌ تم إلغاء العملية.")
+        if m:
+            state['messages_to_delete'].append(m.id)
         delete_quietly(chat_id, state['messages_to_delete'])
         close_session(chat_id)
         return
 
     if not text:
-        msg = bot.send_message(chat_id, "⚠️ الرجاء إرسال نص فقط. وش تبي تكتب بالكابشن؟")
-        state['messages_to_delete'].append(msg.message_id)
-        bot.register_next_step_handler(msg, process_group_caption)
+        msg = safe_call(tg.send_message, chat_id, "⚠️ الرجاء إرسال نص فقط. وش تبي تكتب بالكابشن؟")
+        if msg:
+            state['messages_to_delete'].append(msg.id)
         return
 
     custom_text = text.strip()
     final_caption = BASE_CAPTION if custom_text == 'بدون' else f"{BASE_CAPTION}\n\n\n{custom_text}"
 
     if len(final_caption) > 1024:
-        msg = bot.send_message(chat_id, "⚠️ الكابشن طويل جدًا (الحد 1024 حرف). أرسل أقصر أو 'بدون'.")
-        state['messages_to_delete'].append(msg.message_id)
-        bot.register_next_step_handler(msg, process_group_caption)
+        msg = safe_call(tg.send_message, chat_id, "⚠️ الكابشن طويل جدًا (الحد 1024 حرف). أرسل أقصر أو 'بدون'.")
+        if msg:
+            state['messages_to_delete'].append(msg.id)
         return
 
     with LOCK:
         waiting_for_caption.pop(chat_id, None)
 
-    ack = bot.send_message(chat_id, "⏳ ثواني وأرسلها لك مرتبة...")
-    state['messages_to_delete'].append(ack.message_id)
+    ack = safe_call(tg.send_message, chat_id, "⏳ ثواني وأرسلها لك مرتبة...")
+    if ack:
+        state['messages_to_delete'].append(ack.id)
 
     media_list = state['media_list']
     msgs = list(state['messages_to_delete'])
@@ -207,7 +222,7 @@ def process_group_caption(message):
     def job():
         send_chunks(chat_id, media_list, final_caption)
         delete_quietly(chat_id, msgs)
-        close_session(chat_id)  # ✅ خلصنا → تفريغ فوري للذاكرة
+        close_session(chat_id)
 
     send_queue.put(job)
 
@@ -216,52 +231,53 @@ def send_chunks(chat_id, media_list, caption):
     chunks = [media_list[i:i + 10] for i in range(0, len(media_list), 10)]
     for chunk in chunks:
         chunk[0].caption = caption
-        try:
-            if len(chunk) > 1:
-                bot.send_media_group(chat_id, chunk)
-            elif len(chunk) == 1:
-                item = chunk[0]
-                if isinstance(item, InputMediaPhoto):
-                    bot.send_photo(chat_id, item.media, caption=item.caption)
-                elif isinstance(item, InputMediaVideo):
-                    bot.send_video(chat_id, item.media, caption=item.caption)
-        except Exception as e:
-            logger.error(f"خطأ إرسال ميديا: {e}")
+        if len(chunk) > 1:
+            safe_call(tg.send_media_group, chat_id, chunk)
+        elif len(chunk) == 1:
+            item = chunk[0]
+            if isinstance(item, InputMediaPhoto):
+                safe_call(tg.send_photo, chat_id, item.media, caption=item.caption)
+            elif isinstance(item, InputMediaVideo):
+                safe_call(tg.send_video, chat_id, item.media, caption=item.caption)
         time.sleep(1.5)
 
 
 def delete_quietly(chat_id, message_ids):
     for i in range(0, len(message_ids), 100):
         batch = message_ids[i:i + 100]
-        try:
-            bot.delete_messages(chat_id, batch)
-        except Exception:
+        if safe_call(tg.delete_messages, chat_id, batch) is None:
             for mid in batch:
-                try:
-                    bot.delete_message(chat_id, mid)
-                except Exception:
-                    pass
+                safe_call(tg.delete_messages, chat_id, mid)
 
 
-@bot.message_handler(content_types=['photo', 'video'])
-def handle_media(message):
+# ---------- 📥 مستقبلات الرسائل ----------
+@tg.on_message(filters.photo | filters.video)
+def handle_media(client, message):
     chat_id = message.chat.id
 
     if message.photo:
-        media_item = InputMediaPhoto(message.photo[-1].file_id)
+        item = InputMediaPhoto(message.photo.file_id)
     elif message.video:
-        media_item = InputMediaVideo(message.video.file_id)
+        item = InputMediaVideo(message.video.file_id)
     else:
         return
 
     with LOCK:
+        # إذا نحن بانتظار كابشن منه: أضف الميديا لنفس التجميعة بدون سؤال جديد
+        state = waiting_for_caption.get(chat_id)
+        if state:
+            if len(state['media_list']) < MAX_MEDIA_PER_GROUP:
+                state['media_list'].append(item)
+                state['messages_to_delete'].append(message.id)
+            return
+
         grp = media_groups.setdefault(chat_id, [])
         if len(grp) >= MAX_MEDIA_PER_GROUP:
             overflow = chat_id not in warned_overflow
             if overflow:
                 warned_overflow.add(chat_id)
         else:
-            grp.append({'media': media_item, 'message_id': message.message_id})
+            grp.append({'media': item, 'message_id': message.id})
             overflow = False
 
         if chat_id in timers:
@@ -269,24 +285,32 @@ def handle_media(message):
         t = threading.Timer(GROUP_DELAY, ask_for_caption, args=[chat_id])
         timers[chat_id] = t
 
-    touch_session(chat_id)  # 🔑 ميديا جديدة = جلسة/تجديد 20 دقيقة
+    touch_session(chat_id)
     t.start()
 
     if overflow:
-        try:
-            bot.send_message(chat_id, f"⚠️ الحد الأقصى للتجميعة {MAX_MEDIA_PER_GROUP} عنصر. الباقي أرسله بتجميعة جديدة.")
-        except Exception:
-            pass
+        safe_call(tg.send_message, chat_id,
+                  f"⚠️ الحد الأقصى للتجميعة {MAX_MEDIA_PER_GROUP} عنصر. الباقي أرسله بتجميعة جديدة.")
+
+
+@tg.on_message(filters.text & ~filters.bot)
+def handle_text(client, message):
+    """أي رسالة نصية: إذا الشات بانتظار كابشن → وجّهها للمعالجة."""
+    with LOCK:
+        waiting = message.chat.id in waiting_for_caption
+    if waiting:
+        process_group_caption(message)
 
 
 # ----- 🚀 التشغيل -----
 if __name__ == "__main__":
-    signal.signal(signal.SIGTERM, handle_sigterm)
-
     threading.Thread(target=run_web_server, daemon=True).start()
     threading.Thread(target=cleanup_loop, daemon=True).start()
     threading.Thread(target=sender_worker, daemon=True).start()
 
-    logger.info("🤖 البوت يعمل الآن (جلسات حفظ 20 دقيقة + أداء خفيف).")
-    bot.infinity_polling(timeout=60, long_polling=50, allowed_updates=["message"])
+    tg.start()  # تسجيل الدخول عبر BOT_TOKEN + API_ID + API_HASH
+    logger.info("🤖 البوت يعمل الآن (Pyrogram MTProto + جلسات 20 دقيقة).")
+
+    idle()      # يلتقط SIGTERM من Render ويوقف بأمان عند النوم/إعادة النشر
+    tg.stop()
     logger.info("توقف البوت بشكل نظيف.")
