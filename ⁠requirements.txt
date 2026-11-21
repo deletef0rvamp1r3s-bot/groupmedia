@@ -1,1 +1,4 @@
-pyTelegramBotAPI
+pyrogram>=2.0
+tgcrypto
+Flask>=2.3
+waitress>=2.1
