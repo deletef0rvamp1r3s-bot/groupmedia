@@ -1,12 +1,20 @@
-import os
+import sys
 import asyncio
+
+# 🔧 الإصلاح الجذري والنهائي لمشكلة Event Loop في Python 3.10+
+# (يجب أن يكون في أول الملف قبل أي استيراد آخر)
+if sys.version_info >= (3, 10):
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+import os
 import threading
 import time
 import logging
 import queue
 
 from flask import Flask
-from pyrogram import Client, filters, idle
+from pyrogram import Client, filters
 from pyrogram.types import InputMediaPhoto, InputMediaVideo
 from pyrogram.errors import FloodWait
 
@@ -300,21 +308,29 @@ def handle_text(client, message):
         process_group_caption(message)
 
 
-# ----- 🚀 التشغيل -----
+# ----- 🚀 التشغيل الجذري (يتجاوز مشاكل بايثون 3.10+) -----
 if __name__ == "__main__":
-    # 🔧 إصلاح مشكلة Event Loop في Python 3.10+ على Render
-    try:
-        asyncio.get_event_loop()
-    except RuntimeError:
-        asyncio.set_event_loop(asyncio.new_event_loop())
-
+    # تشغيل الخيوط الخلفية
     threading.Thread(target=run_web_server, daemon=True).start()
     threading.Thread(target=cleanup_loop, daemon=True).start()
     threading.Thread(target=sender_worker, daemon=True).start()
 
-    tg.start()
-    logger.info("🤖 البوت يعمل الآن (Pyrogram MTProto + جلسات 20 دقيقة).")
+    # تعريف الدالة الرئيسية للبوت
+    async def main():
+        await tg.start()
+        logger.info("🤖 البوت يعمل الآن (Pyrogram MTProto + جلسات 20 دقيقة).")
+        # انتظار لا نهائي (بديل آمن لـ idle)
+        await asyncio.Event().wait()
 
-    idle()
-    tg.stop()
-    logger.info("توقف البوت بشكل نظيف.")
+    # جلب حلقة الأحداث التي أنشأناها في بداية الملف
+    loop = asyncio.get_event_loop()
+    
+    try:
+        loop.run_until_complete(main())
+    except (KeyboardInterrupt, SystemExit):
+        pass
+    finally:
+        logger.info("جاري إيقاف البوت بشكل نظيف...")
+        loop.run_until_complete(tg.stop())
+        loop.close()
+        logger.info("توقف البوت بشكل نظيف.")
